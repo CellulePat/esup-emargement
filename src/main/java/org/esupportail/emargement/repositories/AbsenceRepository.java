@@ -5,6 +5,7 @@ import java.util.List;
 
 import org.esupportail.emargement.domain.Absence;
 import org.esupportail.emargement.domain.Context;
+import org.esupportail.emargement.domain.MotifAbsence.StatutAbsence;
 import org.esupportail.emargement.domain.Person;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
@@ -26,4 +27,5 @@ public interface AbsenceRepository extends JpaRepository<Absence, Long>{
 	                                      Date endDate,
 	                                      Context context);
 
+    List<Absence> findByMotifAbsence_StatutAbsence(StatutAbsence statutAbsence);
 }

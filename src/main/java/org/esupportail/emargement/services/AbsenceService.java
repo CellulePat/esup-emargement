@@ -152,4 +152,7 @@ public class AbsenceService {
 
         return calDate.getTime();
     }
+    public List<Absence> findAbsencesByStatut(StatutAbsence statutAbsence) {
+        return absenceRepository.findByMotifAbsence_StatutAbsence(statutAbsence);
+    }
 }

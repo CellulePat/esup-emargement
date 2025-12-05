@@ -109,6 +109,7 @@ public class AbsenceController {
 		return ITEM;
 	}
 	
+	/*
 	@GetMapping(value = "/manager/absence")
 	public String list(Model uiModel) {
 		List<Absence> absences = absenceRepository.findAll();
@@ -120,7 +121,39 @@ public class AbsenceController {
 		}
 		uiModel.addAttribute("absences", absences);
 		return "manager/absence/list";
-	}
+	}*/
+
+    //Ajout d'une méthode de filtrage selon le motif
+    @GetMapping(value = "/manager/absence")
+    public String list(Model uiModel, @RequestParam(required=false) String statut) {
+        List<Absence> absences;
+
+        if (statut != null && !statut.isEmpty()) {
+            try {
+                StatutAbsence statutAbsence = StatutAbsence.valueOf(statut.toUpperCase());
+
+                absences = absenceService.findAbsencesByStatut(statutAbsence);
+
+                uiModel.addAttribute("currentStatutFilter", statut);
+
+            } catch (IllegalArgumentException e) {
+                log.warn("StatutAbsence invalide fourni: {}", statut);
+                absences = absenceRepository.findAll(); // Retour à la liste complète si le statut est invalide
+            }
+        } else {
+            // Pas de filtre, on charge tout (comportement par défaut)
+            absences = absenceRepository.findAll();
+        }
+
+        List<Person> persons = absences.stream().map(abs -> abs.getPerson())
+                .collect(Collectors.toList());
+        personService.setNomPrenom(persons);
+        for (Absence abs : absences) {
+            abs.setNbStoredFiles(storedFileRepository.countByAbsence(abs));
+        }
+        uiModel.addAttribute("absences", absences);
+        return "manager/absence/list";
+    }
 	
     @GetMapping(value = "/manager/absence", params = "form", produces = "text/html")
     public String createForm(Model uiModel) {
