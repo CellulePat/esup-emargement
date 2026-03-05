@@ -68,7 +68,7 @@ public class LdapService {
 		
 		if (!userList.isEmpty()) {
 			emails  = userList.stream()
-                    .map(LdapUser::getEmail)
+                    .map(u -> u.getEmail() != null ? u.getEmail().toLowerCase() : "")
                     .collect(Collectors.toList());
 		}
 		Collections.sort(emails);
@@ -175,7 +175,7 @@ public class LdapService {
 	        case "mail":
 	            return StreamSupport.stream(validators.spliterator(), false)
 	                    .collect(Collectors.toMap(
-	                            LdapUser::getEmail,
+                                u -> u.getEmail() != null ? u.getEmail().toLowerCase() : "",
 	                            Function.identity(),
 	                            mergeFunction
 	                    ));
