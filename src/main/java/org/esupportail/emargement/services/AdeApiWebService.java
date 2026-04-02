@@ -409,7 +409,10 @@ public class AdeApiWebService implements AdeApiService {
 						DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
 						factory.setNamespaceAware(true);
 						DocumentBuilder builder = factory.newDocumentBuilder();
-						Document doc = builder.parse(new java.net.URL(urlMembers).openStream());
+						HttpURLConnection con = (HttpURLConnection) new java.net.URL(urlMembers).openConnection();
+						con.setConnectTimeout(5000);
+						con.setReadTimeout(30000);
+						Document doc = builder.parse(con.getInputStream());
 						doc.getDocumentElement().normalize();
 
 						XPath xpath = XPathFactory.newInstance().newXPath();
@@ -855,6 +858,9 @@ public class AdeApiWebService implements AdeApiService {
 		URL urlConnect = new URL(url);
 		HttpURLConnection con = (HttpURLConnection)urlConnect.openConnection();
 
+		con.setConnectTimeout(5000);
+		con.setReadTimeout(30000);
+
 		if (null != login) {
 		    String encoded = Base64.getEncoder().encodeToString((login+":"+password).getBytes(StandardCharsets.UTF_8));
 		    con.setRequestProperty("Authorization", "Basic "+encoded);
@@ -1054,6 +1060,8 @@ public class AdeApiWebService implements AdeApiService {
 				String url = urlAde + "?sessionId=" + prefsAdeSession.get(0).getValue() + "&function=disconnect";			
 				URL urlConnect = new URL(url);
 				HttpURLConnection con = (HttpURLConnection)urlConnect.openConnection();
+				con.setConnectTimeout(5000);
+				con.setReadTimeout(30000);
 				con.connect();
 				prefsRepository.delete(prefsAdeSession.get(0));
 				log.info("Déconnexion de la session Ade par l'utilisateur : " + auth.getName());
@@ -1173,8 +1181,11 @@ public class AdeApiWebService implements AdeApiService {
 		String urlVet = urlAde + "?sessionId=" + sessionId + "&function=getResources&tree=true&detail=" + detail + "&category=trainee"+ idParam;
 		String vet = "";
 		try {
-	    	  InputStream input = new URL(urlVet).openStream();
-	          SAXBuilder sax = new SAXBuilder();
+			HttpURLConnection con = (HttpURLConnection) new URL(urlVet).openConnection();
+			con.setConnectTimeout(5000);
+			con.setReadTimeout(30000);
+			InputStream input = con.getInputStream();
+			SAXBuilder sax = new SAXBuilder();
 	          /// https://rules.sonarsource.com/java/RSPEC-2755 , prevent xxe
 	          sax.setProperty(XMLConstants.ACCESS_EXTERNAL_DTD, "");
 	          sax.setProperty(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
