@@ -328,132 +328,137 @@ public class AdeService {
     @Transactional
     public int saveEvents(List<AdeResourceBean> beans, String sessionId, String emargementContext, Campus campus,
                           String idProject, boolean update, String typeSync, List<Long> groupes, Long dureeMax) throws ParseException {
-        Context ctx = contextRepository.findByContextKey(emargementContext);
-        int i = 0;
-        String total = String.valueOf(beans.size());
-        int maj = 0;
-        StopWatch time = new StopWatch( );
-        time.start( );
-        log.info("PERF saveEvents BEGIN [ctx={}] [update={}] [typeSync={}] [beans={}]",
-                emargementContext, update, typeSync, beans.size());
-        // Cumuls pour le résumé final
-        long cumProcessSession = 0, cumProcessType = 0, cumStudents = 0, cumLocations = 0;
-        long cumRepartition = 0, cumInstructors = 0, cumExistsCheck = 0, cumMembersChanged = 0;
-        for(AdeResourceBean ade : beans) {
-            long beanStart = System.currentTimeMillis();
-            boolean isSessionExisted = false;
-            long tExistsCheckStart = System.currentTimeMillis();
-            if (ade.getSessionEpreuve().getAdeRepetition() != null) {
-                isSessionExisted = sessionEpreuveRepository.countByAdeActiviteIdAndAdeRepetitionAndContext(ade.getActivityId(), ade.getSessionEpreuve().getAdeRepetition(), ctx)>0;
-            } else {
-                isSessionExisted = sessionEpreuveRepository.countByAdeEventIdAndAdeActiviteIdAndContext(ade.getEventId(), ade.getActivityId(), ctx)>0;
+        AdeImportCache.begin("saveEvents:" + emargementContext + ":" + (update ? "update" : "import"));
+        try {
+            Context ctx = contextRepository.findByContextKey(emargementContext);
+            int i = 0;
+            String total = String.valueOf(beans.size());
+            int maj = 0;
+            StopWatch time = new StopWatch( );
+            time.start( );
+            log.info("PERF saveEvents BEGIN [ctx={}] [update={}] [typeSync={}] [beans={}]",
+                    emargementContext, update, typeSync, beans.size());
+            // Cumuls pour le résumé final
+            long cumProcessSession = 0, cumProcessType = 0, cumStudents = 0, cumLocations = 0;
+            long cumRepartition = 0, cumInstructors = 0, cumExistsCheck = 0, cumMembersChanged = 0;
+            for(AdeResourceBean ade : beans) {
+                long beanStart = System.currentTimeMillis();
+                boolean isSessionExisted = false;
+                long tExistsCheckStart = System.currentTimeMillis();
+                if (ade.getSessionEpreuve().getAdeRepetition() != null) {
+                    isSessionExisted = sessionEpreuveRepository.countByAdeActiviteIdAndAdeRepetitionAndContext(ade.getActivityId(), ade.getSessionEpreuve().getAdeRepetition(), ctx)>0;
+                } else {
+                    isSessionExisted = sessionEpreuveRepository.countByAdeEventIdAndAdeActiviteIdAndContext(ade.getEventId(), ade.getActivityId(), ctx)>0;
+                }
+                cumExistsCheck += System.currentTimeMillis() - tExistsCheckStart;
+                if(!isSessionExisted && !update || update){
+                    SessionEpreuve se = ade.getSessionEpreuve();
+                    boolean isUpdateOk = false;
+                    Date today = DateUtils.truncate(new Date(),  Calendar.DATE);
+                    if(isSessionExisted && update && se.getDateExamen().compareTo(today)>=0) {
+                        boolean isManualSync = "manual".equals(typeSync);
+                        if(isManualSync || (ade.getLastImport() != null && ade.getLastUpdate().compareTo(ade.getLastImport())>=0)) {
+                            clearSessionRelatedData(se);
+                            isUpdateOk = true;
+                        }else{
+                            log.info("Aucune maj de l'évènement car il est déjà à jour , id stocké : " + ade.getEventId());
+                        }
+                    }else if(update && se.getDateExamen().compareTo(today)<0) {
+                        log.info("Aucune maj de l'évènement car l'èvènement est passé , id stocké : " + ade.getEventId());
+                    }else {
+                        se.setAdeProjectId(Long.parseLong(idProject));
+                        se.setDateCreation(new Date());
+                    }
+                    boolean isMembersChanged = false;
+                    if(update) {
+                        long tmc = System.currentTimeMillis();
+                        isMembersChanged = adeApiService.haveAnyMemberGroupsBeenUpdated(ade,sessionId, ctx);
+                        cumMembersChanged += System.currentTimeMillis() - tmc;
+                    }
+                    if(update && isMembersChanged && isUpdateOk) {
+                        List<TagCheck> tcs = tagCheckRepository.findTagCheckBySessionEpreuveId(se.getId());
+                        tagCheckRepository.deleteAll(tcs);
+                    }
+                    if(!isSessionExisted || !update || update && isUpdateOk){
+                        long sessionStart = System.currentTimeMillis();
+
+                        long tStep = System.currentTimeMillis();
+                        processSessionEpreuve(se, campus, ctx);
+                        long tProcessSession = System.currentTimeMillis() - tStep;
+                        cumProcessSession += tProcessSession;
+
+                        tStep = System.currentTimeMillis();
+                        processTypeSession(ade, se, ctx);
+                        long tProcessType = System.currentTimeMillis() - tStep;
+                        cumProcessType += tProcessType;
+
+                        sessionEpreuveRepository.save(se);
+
+                        tStep = System.currentTimeMillis();
+                        int nbStudents = processStudents(se, ade, sessionId, groupes, ctx);
+                        long tStudents = System.currentTimeMillis() - tStep;
+                        cumStudents += tStudents;
+
+                        List<SessionLocation> sls = new ArrayList<>();
+                        tStep = System.currentTimeMillis();
+                        processLocations(se, ade, sessionId, ctx, sls, nbStudents);
+                        long tLocations = System.currentTimeMillis() - tStep;
+                        cumLocations += tLocations;
+
+                        //repartition
+                        tStep = System.currentTimeMillis();
+                        sessionEpreuveService.executeRepartition(se.getId(), "alpha");
+                        long tRepartition = System.currentTimeMillis() - tStep;
+                        cumRepartition += tRepartition;
+
+                        tStep = System.currentTimeMillis();
+                        processInstructors(ade, sessionId, ctx, sls);
+                        long tInstructors = System.currentTimeMillis() - tStep;
+                        cumInstructors += tInstructors;
+
+                        if (appliConfigService.isAdeImportAfficherGroupes(ctx)) {
+                            se.setIsGroupeDisplayed(true);
+                        }
+                        i++;
+                        long sessionTotal = System.currentTimeMillis() - sessionStart;
+                        log.info("PERF saveEvents.SESSION {}/{} [seId={}] [eventId={}] [total={} ms] " +
+                                        "[students={} ms ({} étu)] [locations={} ms] [repartition={} ms] [instructors={} ms] " +
+                                        "[processSession={} ms] [processType={} ms] [membersChanged={} ms] [ctx={}]",
+                                i, total, se.getId(), ade.getEventId(),
+                                sessionTotal, tStudents, nbStudents, tLocations, tRepartition, tInstructors,
+                                tProcessSession, tProcessType, (update ? cumMembersChanged : -1), emargementContext);
+                        dataEmitterService.sendDataImport(String.valueOf(i).concat("/").concat(total));
+                        if(update && isUpdateOk){
+                            maj++;
+                        }
+                        if(dureeMax != null && time.getTime() > dureeMax*1000) {
+                            log.info("Temps d'import ADE Campus dépassé : " + time.getTime() + "secondes");
+                            break;
+                        }
+                    }
+                }
             }
-            cumExistsCheck += System.currentTimeMillis() - tExistsCheckStart;
-            if(!isSessionExisted && !update || update){
-                SessionEpreuve se = ade.getSessionEpreuve();
-                boolean isUpdateOk = false;
-                Date today = DateUtils.truncate(new Date(),  Calendar.DATE);
-                if(isSessionExisted && update && se.getDateExamen().compareTo(today)>=0) {
-                    boolean isManualSync = "manual".equals(typeSync);
-                    if(isManualSync || (ade.getLastImport() != null && ade.getLastUpdate().compareTo(ade.getLastImport())>=0)) {
-                        clearSessionRelatedData(se);
-                        isUpdateOk = true;
-                    }else{
-                        log.info("Aucune maj de l'évènement car il est déjà à jour , id stocké : " + ade.getEventId());
-                    }
-                }else if(update && se.getDateExamen().compareTo(today)<0) {
-                    log.info("Aucune maj de l'évènement car l'èvènement est passé , id stocké : " + ade.getEventId());
-                }else {
-                    se.setAdeProjectId(Long.parseLong(idProject));
-                    se.setDateCreation(new Date());
-                }
-                boolean isMembersChanged = false;
-                if(update) {
-                    long tmc = System.currentTimeMillis();
-                    isMembersChanged = adeApiService.haveAnyMemberGroupsBeenUpdated(ade,sessionId, ctx);
-                    cumMembersChanged += System.currentTimeMillis() - tmc;
-                }
-                if(update && isMembersChanged && isUpdateOk) {
-                    List<TagCheck> tcs = tagCheckRepository.findTagCheckBySessionEpreuveId(se.getId());
-                    tagCheckRepository.deleteAll(tcs);
-                }
-                if(!isSessionExisted || !update || update && isUpdateOk){
-                    long sessionStart = System.currentTimeMillis();
-
-                    long tStep = System.currentTimeMillis();
-                    processSessionEpreuve(se, campus, ctx);
-                    long tProcessSession = System.currentTimeMillis() - tStep;
-                    cumProcessSession += tProcessSession;
-
-                    tStep = System.currentTimeMillis();
-                    processTypeSession(ade, se, ctx);
-                    long tProcessType = System.currentTimeMillis() - tStep;
-                    cumProcessType += tProcessType;
-
-                    sessionEpreuveRepository.save(se);
-
-                    tStep = System.currentTimeMillis();
-                    int nbStudents = processStudents(se, ade, sessionId, groupes, ctx);
-                    long tStudents = System.currentTimeMillis() - tStep;
-                    cumStudents += tStudents;
-
-                    List<SessionLocation> sls = new ArrayList<>();
-                    tStep = System.currentTimeMillis();
-                    processLocations(se, ade, sessionId, ctx, sls, nbStudents);
-                    long tLocations = System.currentTimeMillis() - tStep;
-                    cumLocations += tLocations;
-
-                    //repartition
-                    tStep = System.currentTimeMillis();
-                    sessionEpreuveService.executeRepartition(se.getId(), "alpha");
-                    long tRepartition = System.currentTimeMillis() - tStep;
-                    cumRepartition += tRepartition;
-
-                    tStep = System.currentTimeMillis();
-                    processInstructors(ade, sessionId, ctx, sls);
-                    long tInstructors = System.currentTimeMillis() - tStep;
-                    cumInstructors += tInstructors;
-
-                    if (appliConfigService.isAdeImportAfficherGroupes(ctx)) {
-                        se.setIsGroupeDisplayed(true);
-                    }
-                    i++;
-                    long sessionTotal = System.currentTimeMillis() - sessionStart;
-                    log.info("PERF saveEvents.SESSION {}/{} [seId={}] [eventId={}] [total={} ms] " +
-                                    "[students={} ms ({} étu)] [locations={} ms] [repartition={} ms] [instructors={} ms] " +
-                                    "[processSession={} ms] [processType={} ms] [membersChanged={} ms] [ctx={}]",
-                            i, total, se.getId(), ade.getEventId(),
-                            sessionTotal, tStudents, nbStudents, tLocations, tRepartition, tInstructors,
-                            tProcessSession, tProcessType, (update ? cumMembersChanged : -1), emargementContext);
-                    dataEmitterService.sendDataImport(String.valueOf(i).concat("/").concat(total));
-                    if(update && isUpdateOk){
-                        maj++;
-                    }
-                    if(dureeMax != null && time.getTime() > dureeMax*1000) {
-                        log.info("Temps d'import ADE Campus dépassé : " + time.getTime() + "secondes");
-                        break;
-                    }
+            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+            String eppn = (auth!=null)?  auth.getName() : "system";
+            if(update) {
+                log.info("Bilan syncrhonisation ADE : " + maj + " importé(s)");
+                logService.log(ACTION.ADE_SYNC, RETCODE.SUCCESS, typeSync + " - Nb maj sessions : " + maj, eppn, null, emargementContext, eppn);
+            }else {
+                if(i>0) {
+                    logService.log(ACTION.ADE_IMPORT, RETCODE.SUCCESS, "Import évènements : " + i, eppn, null, emargementContext, eppn);
                 }
             }
+            log.info("PERF saveEvents END [ctx={}] [sessions_traitees={}/{}] [maj={}] [total={} ms] " +
+                            "[cum_existsCheck={} ms] [cum_processSession={} ms] [cum_processType={} ms] " +
+                            "[cum_students={} ms] [cum_locations={} ms] [cum_repartition={} ms] [cum_instructors={} ms] " +
+                            "[cum_membersChanged={} ms]",
+                    emargementContext, i, beans.size(), maj, time.getTime(),
+                    cumExistsCheck, cumProcessSession, cumProcessType,
+                    cumStudents, cumLocations, cumRepartition, cumInstructors, cumMembersChanged);
+            return i;
+        } finally {
+            AdeImportCache.end();
         }
-        Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-        String eppn = (auth!=null)?  auth.getName() : "system";
-        if(update) {
-            log.info("Bilan syncrhonisation ADE : " + maj + " importé(s)");
-            logService.log(ACTION.ADE_SYNC, RETCODE.SUCCESS, typeSync + " - Nb maj sessions : " + maj, eppn, null, emargementContext, eppn);
-        }else {
-            if(i>0) {
-                logService.log(ACTION.ADE_IMPORT, RETCODE.SUCCESS, "Import évènements : " + i, eppn, null, emargementContext, eppn);
-            }
-        }
-        log.info("PERF saveEvents END [ctx={}] [sessions_traitees={}/{}] [maj={}] [total={} ms] " +
-                        "[cum_existsCheck={} ms] [cum_processSession={} ms] [cum_processType={} ms] " +
-                        "[cum_students={} ms] [cum_locations={} ms] [cum_repartition={} ms] [cum_instructors={} ms] " +
-                        "[cum_membersChanged={} ms]",
-                emargementContext, i, beans.size(), maj, time.getTime(),
-                cumExistsCheck, cumProcessSession, cumProcessType,
-                cumStudents, cumLocations, cumRepartition, cumInstructors, cumMembersChanged);
-        return i;
     }
 
     private void clearSessionRelatedData(SessionEpreuve se) {
@@ -633,6 +638,11 @@ public class AdeService {
                     long tPhase2End = System.currentTimeMillis() - tPhase2;
                     log.info("PERF processStudents.PHASE2_codes [seId={}] [members={}] [codes={}] [http_calls={}] [attribute={}] [total={} ms]",
                             se.getId(), allMembers.size(), allCodes.size(), phase2HttpCalls, adeAttribute, tPhase2End);
+                    if (!isAdeCampusLimitQueriesEnabled && allMembers.size() > 50) {
+                        log.warn("Configuration ADE_LIMIT_QUERIES désactivée pour le contexte '{}' avec {} membres : {} appels HTTP ADE séquentiels (un par membre). " +
+                                        "L'activer dans la configuration applicative permet de regrouper les membres en chunks de 100 et de réduire drastiquement le temps d'import.",
+                                ctx.getKey(), allMembers.size(), phase2HttpCalls);
+                    }
 
                     String filter = "code".equals(adeAttribute)? "supannEtuId" : "mail";
                     long tLdap = System.currentTimeMillis();
@@ -1042,26 +1052,31 @@ public class AdeService {
     }
 
     public void updateSessionEpreuve(List<SessionEpreuve> seList, String emargementContext, String typeSync, Context ctx) throws AdeApiRequestException, IOException, ParseException {
-        for (SessionEpreuve se : seList) {
-            boolean isSessionExisted = false;
-            if (se.getAdeRepetition() != null) {
-                isSessionExisted = sessionEpreuveRepository.countByAdeActiviteIdAndAdeRepetitionAndContext(se.getAdeActiviteId(), se.getAdeRepetition(), ctx)>0;
-            } else {
-                isSessionExisted = sessionEpreuveRepository.countByAdeEventIdAndAdeActiviteIdAndContext(se.getAdeEventId(), se.getAdeActiviteId(), ctx)>0;
-            }
-            if(!isSessionExisted) {
-                se.setAdeOrphan(true);
-                sessionEpreuveRepository.save(se);
-                log.info("La session epreuve id="+se.getId()+" est orpheline car son évènement ADE n'existe plus dans l'API");
-            }else {
-                String idProject = String.valueOf(se.getAdeProjectId());
-                String sessionId = getSessionIdByProjectId(idProject, emargementContext, false);
-                List<Long> idEvents  = Arrays.asList(se.getAdeEventId());
-                List<AdeResourceBean> beans = getEventsFromXml(sessionId , null, null, null, idEvents, "", true, ctx, null);
-                if(!beans.isEmpty()) {
-                    saveEvents(beans, sessionId, emargementContext, null, idProject, true, typeSync, null, null);
+        AdeImportCache.begin("updateSessionEpreuve:" + emargementContext + ":" + typeSync);
+        try {
+            for (SessionEpreuve se : seList) {
+                boolean isSessionExisted = false;
+                if (se.getAdeRepetition() != null) {
+                    isSessionExisted = sessionEpreuveRepository.countByAdeActiviteIdAndAdeRepetitionAndContext(se.getAdeActiviteId(), se.getAdeRepetition(), ctx)>0;
+                } else {
+                    isSessionExisted = sessionEpreuveRepository.countByAdeEventIdAndAdeActiviteIdAndContext(se.getAdeEventId(), se.getAdeActiviteId(), ctx)>0;
+                }
+                if(!isSessionExisted) {
+                    se.setAdeOrphan(true);
+                    sessionEpreuveRepository.save(se);
+                    log.info("La session epreuve id="+se.getId()+" est orpheline car son évènement ADE n'existe plus dans l'API");
+                }else {
+                    String idProject = String.valueOf(se.getAdeProjectId());
+                    String sessionId = getSessionIdByProjectId(idProject, emargementContext, false);
+                    List<Long> idEvents  = Arrays.asList(se.getAdeEventId());
+                    List<AdeResourceBean> beans = getEventsFromXml(sessionId , null, null, null, idEvents, "", true, ctx, null);
+                    if(!beans.isEmpty()) {
+                        saveEvents(beans, sessionId, emargementContext, null, idProject, true, typeSync, null, null);
+                    }
                 }
             }
+        } finally {
+            AdeImportCache.end();
         }
     }
 
@@ -1073,37 +1088,42 @@ public class AdeService {
                             String newGroupe, List<Long> existingGroupe, String existingSe, String codeComposante,
                             Campus campus, List<String> idList, List<AdeResourceBean> beans, String idProject, Long dureeMax, boolean update, String libelle)
             throws AdeApiRequestException, IOException, ParserConfigurationException, SAXException, ParseException{
-        int nbImports = 0;
-        if (idEvents != null) {
-            Authentication auth = SecurityContextHolder.getContext().getAuthentication();
-            if(idProject == null) {
-                idProject = getCurrentProject(null, auth.getName(), emargementContext);
-            }
-            String sessionId = getSessionIdByProjectId(idProject, emargementContext);
-            Context ctx = contextRepository.findByKey(emargementContext);
-            if(beans == null) {
-                beans = getAdeBeans(sessionId, strDateMin, strDateMax, idEvents, existingSe,
-                        codeComposante, idList, ctx, update, libelle);
-            }
-            if (!beans.isEmpty()) {
-                List<Long> groupes = new ArrayList<>();
-                if (appliConfigService.isAdeCampusGroupeAutoEnabled(ctx)) {
-                    if (existingGroupe != null) {
-                        groupes.addAll(existingGroupe);
-                    }
-                    if (newGroupe!=null && !newGroupe.isEmpty() && auth != null) {
-                        Groupe groupe = groupeService.createNewGroupe(newGroupe, emargementContext,
-                                sessionEpreuveService.getCurrentanneUniv(), auth.getName());
-                        groupes.add(groupe.getId());
-                    }
+        AdeImportCache.begin("importEvents:" + emargementContext + ":" + (update ? "update" : "import"));
+        try {
+            int nbImports = 0;
+            if (idEvents != null) {
+                Authentication auth = SecurityContextHolder.getContext().getAuthentication();
+                if(idProject == null) {
+                    idProject = getCurrentProject(null, auth.getName(), emargementContext);
                 }
-                dataEmitterService.sendDataImport("0/".concat(String.valueOf(beans.size())));
-                nbImports = saveEvents(beans, sessionId, emargementContext, campus, idProject, update, null, groupes, dureeMax);
-            } else {
-                log.info("Aucun évènement à importer");
+                String sessionId = getSessionIdByProjectId(idProject, emargementContext);
+                Context ctx = contextRepository.findByKey(emargementContext);
+                if(beans == null) {
+                    beans = getAdeBeans(sessionId, strDateMin, strDateMax, idEvents, existingSe,
+                            codeComposante, idList, ctx, update, libelle);
+                }
+                if (!beans.isEmpty()) {
+                    List<Long> groupes = new ArrayList<>();
+                    if (appliConfigService.isAdeCampusGroupeAutoEnabled(ctx)) {
+                        if (existingGroupe != null) {
+                            groupes.addAll(existingGroupe);
+                        }
+                        if (newGroupe!=null && !newGroupe.isEmpty() && auth != null) {
+                            Groupe groupe = groupeService.createNewGroupe(newGroupe, emargementContext,
+                                    sessionEpreuveService.getCurrentanneUniv(), auth.getName());
+                            groupes.add(groupe.getId());
+                        }
+                    }
+                    dataEmitterService.sendDataImport("0/".concat(String.valueOf(beans.size())));
+                    nbImports = saveEvents(beans, sessionId, emargementContext, campus, idProject, update, null, groupes, dureeMax);
+                } else {
+                    log.info("Aucun évènement à importer");
+                }
             }
+            return nbImports;
+        } finally {
+            AdeImportCache.end();
         }
-        return nbImports;
     }
 
     public List<String> getValuesPref(String eppn, String pref) {
