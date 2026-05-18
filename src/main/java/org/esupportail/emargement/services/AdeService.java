@@ -351,6 +351,13 @@ public class AdeService {
                     isSessionExisted = sessionEpreuveRepository.countByAdeEventIdAndAdeActiviteIdAndContext(ade.getEventId(), ade.getActivityId(), ctx)>0;
                 }
                 cumExistsCheck += System.currentTimeMillis() - tExistsCheckStart;
+                // LOG TEMPORAIRE À AJOUTER
+                log.info("DEBUG bean [eventId={}] [activityId={}] [repetition={}] [date={}] [isSessionExisted={}] [update={}]",
+                        ade.getEventId(), ade.getActivityId(),
+                        ade.getSessionEpreuve().getAdeRepetition(),
+                        ade.getSessionEpreuve().getDateExamen(),
+                        isSessionExisted, update);
+                // FIN LOG TEMPORAIRE
                 if(!isSessionExisted && !update || update){
                     SessionEpreuve se = ade.getSessionEpreuve();
                     boolean isUpdateOk = false;
